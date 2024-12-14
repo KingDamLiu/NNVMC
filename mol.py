@@ -46,7 +46,7 @@ H2O_mol.build(
     spin=0)
 
 cfg = base_config.default()
-cfg.system.pyscf_mol = BH_mol
+cfg.system.pyscf_mol = H2O_mol
 
 # Set training parameters
 cfg.optim.laplacian = 'folx'
@@ -55,7 +55,7 @@ cfg.optim.reset_if_nan = True
 cfg.optim.lr.rate=0.05
 cfg.debug.check_nan = True
 cfg.system.states = 1
-cfg.system.states_total = 3
+cfg.system.states_total = 5
 cfg.system.states_update = 1
 cfg.batch_size = 4096
 cfg.optim.iterations = 200000
@@ -116,7 +116,7 @@ else:
 # cfg.observables.dipole = True  # dipole moment
 
 if status['pretrain']['status'] == False:
-    main.pre_train(cfg)
+    main.pre_train(cfg, status)
 elif status['pretrain']['status'] == True:
     main.ipf_train(cfg, status)
 

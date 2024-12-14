@@ -26,6 +26,7 @@ def read_status(cfg):
     return status
 
 def pre_train(cfg: ml_collections.ConfigDict, status):
+    cfg.system.states = cfg.system.states_total
     # 初始化配置和设备
     (cfg, key, num_devices, num_hosts, num_states, host_batch_size,
      total_host_batch_size, device_batch_size, data_shape, atoms,

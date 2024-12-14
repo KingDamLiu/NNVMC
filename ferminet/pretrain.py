@@ -39,6 +39,7 @@ def get_hf(molecule: Sequence[system.Atom] | None = None,
            pyscf_mol: pyscf.gto.Mole | None = None,
            restricted: bool | None = False,
            states: int = 0,
+           method: str = 'hf',
            excitation_type: str = 'ordered') -> scf.Scf:
   """Returns an Scf object with the Hartree-Fock solution to the system.
 
@@ -62,9 +63,11 @@ def get_hf(molecule: Sequence[system.Atom] | None = None,
   """
   if pyscf_mol:
     scf_approx = scf.Scf(pyscf_mol=pyscf_mol,
+                         method=method,
                          restricted=restricted)
   else:
     scf_approx = scf.Scf(molecule,
+                         method=method,
                          nelectrons=nspins,
                          basis=basis,
                          ecp=ecp,
@@ -115,6 +118,7 @@ def make_pretrain_step(
     batch_network: networks.LogFermiNetLike,
     optimizer_update: optax.TransformUpdateFn,
     electrons: Tuple[int, int],
+    mcmc_target: str = 'Psi',
     batch_size: int = 0,
     full_det: bool = False,
     scf_fraction: float = 0.0,
@@ -149,15 +153,27 @@ def make_pretrain_step(
     raise ValueError('scf_fraction must be in between 0 and 1, inclusive.')
 
   if states:
-    def scf_network(fn, x):
-      x = x.reshape(x.shape[:-1] + (states, -1))
-      slater_fn = jax.vmap(fn, in_axes=(-2, None), out_axes=-2)
-      slogdets = slater_fn(x, electrons)
-      # logsumexp trick
-      maxlogdet = jnp.max(slogdets[1])
-      dets = slogdets[0] * jnp.exp(slogdets[1] - maxlogdet)
-      result = jnp.linalg.slogdet(dets)
-      return result[1] + maxlogdet * slogdets[1].shape[-1]
+    logging.info('Pretrain mcmc target psi: {mcmc_target}')
+    if mcmc_target == 'Psi':
+      def scf_network(fn, x):
+        x = x.reshape(x.shape[:-1] + (states, -1))
+        slater_fn = jax.vmap(fn, in_axes=(-2, None), out_axes=-2)
+        slogdets = slater_fn(x, electrons)
+        # logsumexp trick
+        max_logdet = jnp.max(slogdets[1], axis=(-1, -2, -3), keepdims=True)
+        det_sum = jnp.sum(slogdets[0] * jnp.exp(slogdets[1] - max_logdet), axis=-1)
+        result = jnp.linalg.slogdet(jnp.abs(det_sum))
+        return result[1]+max_logdet[:,0,0,0]
+    elif mcmc_target == 'diag':
+      def scf_network(fn, x):
+        slater_fn = jax.vmap(fn, in_axes=(-2, None), out_axes=-2)
+        slogdets = slater_fn(x, electrons)
+        # logsumexp trick
+        max_logdet = jnp.max(slogdets[1], axis=-1, keepdims=True)
+        det_sum = jnp.sum(slogdets[0] * jnp.exp(slogdets[1] - max_logdet), axis=-1)
+        log_psis = jnp.log(jnp.abs(det_sum)) + jnp.squeeze(max_logdet, axis=-1)
+        result = jnp.diagonal(log_psis, axis1=1, axis2=2)
+        return result
   else:
     scf_network = lambda fn, x: fn(x, electrons)[1]
 
@@ -188,10 +204,11 @@ def make_pretrain_step(
     if states:
       # Make vmap-ed versions of eval_orbitals and batch_orbitals over the
       # states dimension.
-      # (batch, states, nelec*ndim)
-      pos = jnp.reshape(pos, pos.shape[:-1] + (states, -1))
-      # (batch, states, nelec)
-      spins = jnp.reshape(spins, spins.shape[:-1] + (states, -1))
+      if mcmc_target == 'Psi':
+        # (batch, states, nelec*ndim)
+        pos = jnp.reshape(pos, pos.shape[:-1] + (states, -1))
+        # (batch, states, nelec)
+        spins = jnp.reshape(spins, spins.shape[:-1] + (states, -1))
 
       scf_orbitals = jax.vmap(
           scf_approx.eval_orbitals, in_axes=(-2, None), out_axes=-4
@@ -204,16 +221,16 @@ def make_pretrain_step(
         # Dimensions of result are
         # [(batch, states, ndet*states, nelec, nelec)]
         result = vmapped_orbitals(params, pos, spins, atoms, charges)
+        print(result[0].shape)
         result = [
             jnp.reshape(r, r.shape[:-3] + (states, -1) + r.shape[-2:])
             for r in result
         ]
-        result = [jnp.transpose(r, (0, 3, 1, 2, 4, 5)) for r in result]
+        result = [jnp.transpose(r, (0, 2, 1, 3, 4, 5)) for r in result]
         # We draw distinct samples for each excited state (electron
         # configuration), and then evaluate each state within each sample.
         # Output dimensions are:
-        # (batch, det, electron configuration,
-        # excited state, electron, orbital)
+        # (batch, electron configuration, excited state, det, electron, orbital)
         return result
 
     else:
@@ -236,7 +253,10 @@ def make_pretrain_step(
           ),
           axis=-2,
       )
-      result = jnp.mean(cnorm(target[:, None, ...], orbitals[0])).real
+      if mcmc_target == 'diag':
+        target = jnp.diagonal(target, axis1=1, axis2=2)
+        orbitals = [jnp.diagonal(o, axis1=1, axis2=2) for o in orbitals]
+      result = jnp.mean(cnorm(target, orbitals[0])).real
     else:
       result = jnp.array([
           jnp.mean(cnorm(t[:, None, ...], o)).real
@@ -276,6 +296,7 @@ def pretrain_hartree_fock(
     logger: Callable[[int, float], None] | None = None,
     scf_fraction: float = 0.0,
     states: int = 0,
+    mcmc_target: str = 'Psi',
 ):
   """Performs training to match initialization as closely as possible to HF.
 
@@ -323,6 +344,7 @@ def pretrain_hartree_fock(
       batch_orbitals,
       batch_network,
       optimizer.update,
+      mcmc_target = mcmc_target,
       electrons=electrons,
       batch_size=batch_size,
       full_det=network_options.full_det,
@@ -333,9 +355,14 @@ def pretrain_hartree_fock(
 
   batch_spins = jnp.tile(spins[None], [positions.shape[1], 1])
   pmap_spins = kfac_jax.utils.replicate_all_local_devices(batch_spins)
-  data = networks.FermiNetData(
-      positions=positions, spins=pmap_spins, atoms=atoms, charges=charges
-  )
+  if mcmc_target == 'Psi':
+    data = networks.FermiNetData(
+        positions=positions, spins=pmap_spins, atoms=atoms, charges=charges
+    )
+  elif mcmc_target == 'diag':
+    data = networks.FermiNetData(
+        positions=jnp.reshape(positions, positions.shape[:2]+(states, -1,)), spins=jnp.reshape(pmap_spins, positions.shape[:2]+(states, -1,)), atoms=atoms, charges=charges
+    )
 
   for t in range(iterations):
     sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
@@ -344,4 +371,4 @@ def pretrain_hartree_fock(
     logging.info('Pretrain iter %05d: %g %g', t, loss[0], pmove[0])
     if logger:
       logger(t, loss[0])
-  return params, data.positions
+  return params, jnp.reshape(data.positions, positions.shape[:2]+(-1,))

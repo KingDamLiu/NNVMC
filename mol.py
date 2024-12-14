@@ -2,10 +2,11 @@
 
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # 设置使用 GPU 0
 from ferminet import base_config
-from ferminet import train
+from ferminet import train, main
 import os
 import jax
 from absl import logging
+import yaml
 
 os.environ['NVIDIA_TF32_OVERRIDE']="0"
 # jax.config.update("jax_enable_x64", False)
@@ -45,7 +46,7 @@ H2O_mol.build(
     spin=0)
 
 cfg = base_config.default()
-cfg.system.pyscf_mol = LiH_mol
+cfg.system.pyscf_mol = BH_mol
 
 # Set training parameters
 cfg.optim.laplacian = 'folx'
@@ -53,13 +54,19 @@ cfg.optim.reset_if_nan = True
 # cfg.optim.optimizer = 'sgd'
 cfg.optim.lr.rate=0.05
 cfg.debug.check_nan = True
-cfg.system.states = 5
+cfg.system.states = 1
+cfg.system.states_total = 3
+cfg.system.states_update = 1
 cfg.batch_size = 4096
 cfg.optim.iterations = 200000
+
+cfg.mcmc.target = 'diag' # 'diag'
 
 # cfg.system.use_pp = True  # Enable pseudopotentials
 # cfg.system.pp.symbols = ['O']  # Indicate which atoms to apply PP to
 cfg.pretrain.iterations = 10000
+cfg.pretrain.method = 'casci'
+cfg.network.type = 'multi'# 'single'
 # cfg.network.network_type = 'psiformer'
 # cfg.network.psiformer.num_layers = 2
 # cfg.network.psiformer.num_heads = 4
@@ -67,15 +74,54 @@ cfg.pretrain.iterations = 10000
 # cfg.network.psiformer.mlp_hidden_dims = (128,)
 # cfg.network.determinants = 16
 # cfg.network.full_det = False
-cfg.optim.objective='vmc_overlap'
+cfg.optim.objective='vmc_ipf'
 cfg.pretrain.excitation_type = 'ordered' # 'random'
-cfg.log.save_path = '../EXP/Overlap/Mol_ferminet/'+'LiH'
+cfg.log.save_path = '../Test/ferminet/'+'BH_cassci_diag_ipf'
+cfg.run_model = 'test'
 # cfg.log.restore_path = ''
 
-cfg.observables.s2 = True  # spin magnitude
-cfg.observables.density = True  # density matrix
-cfg.observables.density_basis = 'def2-tzvpd'  # basis used for DM calculation
-cfg.observables.dipole = True  # dipole moment
+status = dict(
+    total_states = 5,
+    batch_size = 4096,
+    pretrain = dict(
+        status = False,
+        Epochs = 0,
+    ),
+    vmctrain = dict(
+        psi_0 = dict(
+            status = False,
+            Epochs = 0,
+            ),
+        ),
+    posttrain = dict(
+        status = False,
+        Epochs = 0,)
+)
 
+for i in range(cfg.system.states_total):
+    status['vmctrain']['psi_'+str(i)] = dict(
+        status = False,
+        Epochs = 0,
+    )
+if not os.path.exists(cfg.log.save_path+'/status.yaml'):
+    with open(cfg.log.save_path+'/status.yaml', 'w') as f:
+        yaml.dump(status, f)
+else:
+    with open(cfg.log.save_path+'/status.yaml', 'r') as f:
+        status = yaml.load(f, Loader=yaml.FullLoader)
 
-train.train(cfg)
+# cfg.observables.s2 = True  # spin magnitude
+# cfg.observables.density = True  # density matrix
+# cfg.observables.density_basis = 'def2-tzvpd'  # basis used for DM calculation
+# cfg.observables.dipole = True  # dipole moment
+
+if status['pretrain']['status'] == False:
+    main.pre_train(cfg)
+elif status['pretrain']['status'] == True:
+    main.ipf_train(cfg, status)
+
+# if status
+# # main.vmc_train(cfg)
+# main.ipf_train(cfg)
+# cfg.log.restore_path = '/home/liujinde/data/home/liujinde/deep_wavafunction/Excited_Calculate/Test/ferminet/BH_casscf_diag/pretrain/qmcjax_ckpt_009999.npz'
+# main.post_process(cfg)

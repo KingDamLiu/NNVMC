@@ -1356,6 +1356,39 @@ def make_total_ansatz(signed_network: FermiNetLike,
 
   return total_ansatz
 
+def make_state_diag(signed_network: FermiNetLike,
+                      n: int,
+                      complex_output: bool = False) -> FermiNetLike:
+  """Construct a single-output ansatz which gives the meta-Slater determinant.
+
+  Let signed_network(params, pos, spins, options) be a function which returns
+  psi_1(pos), psi_2(pos), ... psi_n(pos) as a pair of arrays, one with values
+  of sign(psi_k), one with values of log(psi_k). Then this function returns a
+  new function which computes det[psi_i(pos_j)], given an array of positions
+  (and possibly spins) which has n times as many dimensions as expected by
+  signed_network. The output of this new meta-determinant is also given as a
+  sign, log pair.
+
+  Args:
+    signed_network: A function with the same calling convention as the FermiNet.
+    n: the number of excited states, needed to know how to shape the determinant
+    complex_output: If true, the output of the network is complex, and the
+      individual states return phase angles rather than signs.
+
+  Returns:
+    A function with a single output which combines the individual excited states
+    into a greater wavefunction given by the meta-Slater determinant.
+  """
+  state_matrix = make_state_matrix(signed_network, n)
+
+  def state_diag(params, pos, spins, atoms, charges, **kwargs):
+    """Evaluate trace of the state matrix for a given ansatz."""
+    _, log_in = state_matrix(
+        params, pos, spins, atoms=atoms, charges=charges, **kwargs)
+
+    return jnp.diag(log_in)
+
+  return state_diag
 
 ## FermiNet ##
 

@@ -219,6 +219,7 @@ def default() -> ml_collections.ConfigDict:
           # mean of the distance to the nuclei.
           'scale_by_nuclear_distance': False,
           'blocks': 1,  # Number of blocks to split the MCMC sampling into
+          'target': 'Psi', # 采样目标函数，可以选择为'Psi'或'diag'，前者表示多能级波函数构成的总行列式波函数，后者表示各个能级的波函数；还会影响预训练目标，前者为多能级波函数的能量期望，后者为各个能级的波函数构成的矩阵，后者为多能级波函数矩阵的对角元。
       },
       'network': {
           'network_type': 'ferminet',  # One of 'ferminet' or 'psiformer'.
@@ -308,7 +309,7 @@ def default() -> ml_collections.ConfigDict:
           'deterministic': False,  # Use a deterministic seed.
       },
       'pretrain': {
-          'method': 'hf',  # Currently only 'hf' is supported.
+          'method': 'hf',  # 增加了对casscf，casci的支持
           'iterations': 1000,  # Only used if method is 'hf'.
           'basis': 'ccpvdz',  # Larger than STO-6G, but good for excited states
           # Fraction of SCF to use in pretraining MCMC. This enables pretraining

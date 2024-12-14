@@ -488,9 +488,10 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
 
   # Create parameters, network, and vmaped/pmaped derivations
 
-  if cfg.pretrain.method == 'hf' and cfg.pretrain.iterations > 0:
+  if cfg.pretrain.iterations > 0:
     hartree_fock = pretrain.get_hf(
         pyscf_mol=cfg.system.get('pyscf_mol'),
+        method = cfg.pretrain.method,
         molecule=cfg.system.molecule,
         nspins=nspins,
         restricted=False,
@@ -571,6 +572,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   signed_network = network.apply
   # Often just need log|psi(x)|.
   if cfg.system.get('states', 0):
+    network_mcmc = networks.make_state_diag(signed_network,
+                                               cfg.system.get('states', 0),
+                                               complex_output=use_complex)
     if cfg.optim.objective == 'vmc_overlap':
       logabs_network = networks.make_state_trace(signed_network,
                                                  cfg.system.states)
@@ -584,7 +588,12 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   batch_network = jax.vmap(
       logabs_network, in_axes=(None, 0, 0, 0, 0), out_axes=0
   )  # batched network
-
+  if cfg.mcmc.target == 'Psi':
+    batch_network_mcmc = batch_network
+  else:
+    batch_network_mcmc = jax.vmap(
+        network_mcmc, in_axes=(None, 0, 0, 0, 0), out_axes=0
+    )  # batched network for MCMC
   # Exclusively when computing the gradient wrt the energy for complex
   # wavefunctions, it is necessary to have log(psi) rather than log(|psi|).
   # This is unused if the wavefunction is real-valued.
@@ -768,7 +777,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
 
   if (
       t_init == 0
-      and cfg.pretrain.method == 'hf'
       and cfg.pretrain.iterations > 0
   ):
     pretrain_spins = spins[0, 0]
@@ -792,6 +800,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         batch_size=device_batch_size,
         scf_fraction=cfg.pretrain.get('scf_fraction', 0.0),
         states=cfg.system.states,
+        mcmc_target = cfg.mcmc.target,
     )
 
   # Main training
@@ -799,11 +808,12 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   # Construct MCMC step
   atoms_to_mcmc = atoms if cfg.mcmc.scale_by_nuclear_distance else None
   mcmc_step = mcmc.make_mcmc_step(
-      batch_network,
+      batch_network_mcmc,
       device_batch_size,
       steps=cfg.mcmc.steps,
       atoms=atoms_to_mcmc,
-      blocks=cfg.mcmc.blocks * num_states,
+      # blocks=cfg.mcmc.blocks * num_states,
+      blocks = 1
   )
   # Construct loss and optimizer
   laplacian_method = cfg.optim.get('laplacian', 'default')
@@ -983,6 +993,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         jnp.asarray(cfg.mcmc.move_width))
   pmoves = np.zeros(cfg.mcmc.adapt_frequency)
 
+  if cfg.mcmc.target == 'diag':
+    data.positions = jnp.reshape(data.positions, data_shape + (cfg.system.states, -1,))
+    data.spins = jnp.reshape(data.spins, data_shape + (cfg.system.states, -1,))
   if t_init == 0:
     logging.info('Burning in MCMC chain for %d steps', cfg.mcmc.burn_in)
 

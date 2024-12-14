@@ -81,6 +81,7 @@ class Scf:
                ecp: Mapping[str, str] | None = None,
                core_electrons: Mapping[str, int] | None = None,
                pyscf_mol: pyscf.gto.Mole | None = None,
+               method: str = 'hf',
                restricted: bool = True):
     pyscf.lib.param.TMPDIR = None
 
@@ -124,6 +125,12 @@ class Scf:
     self._mol_jax = gto.Mol.from_pyscf_mol(self._mol)
     self.restricted = restricted
     self.excitations = None
+    self.method = method
+    self.ci_vectors = None
+    self.alpha_strings = None
+    self.beta_strings = None
+    self.ncore = None
+    self.n_determinants = 16
 
   def run(self,
           dm0: np.ndarray | None = None,
@@ -150,6 +157,11 @@ class Scf:
     """
     try:
       self.mean_field.kernel(dm0=dm0)
+      if self.method == 'casci':
+        self.initialize_casci(ncas=8, nelec=(3,3), nroots=excitations+1)
+      elif self.method == 'casscf':
+        self.initialize_casscf(ncas=8, nelec=(3,3), nroots=excitations+1, state_avg=True, fix_spin=None)
+
     except TypeError:
       logging.info('Mean-field solver does not support specifying an initial '
                    'density matrix.')
@@ -181,6 +193,64 @@ class Scf:
       else:
         raise ValueError(f'Invalid excitation type: {excitation_type}')
     return self.mean_field
+
+  def initialize_casci(self, ncas: int, nelec: Tuple[int, int], nroots: int = 1):
+      """
+      Initialize CASCI parameters.
+
+      Args:
+          ncas: Number of active space orbitals.
+          nelec: Tuple of (alpha electrons, beta electrons).
+          nroots: Number of states (including excited states) to compute.
+      """
+      from pyscf import gto, scf, mcscf
+      from pyscf.fci import cistring
+
+      mf = scf.RHF(self._mol).run()
+      # 设置 CASCI 参数
+      casci = mcscf.CASCI(mf, ncas, sum(nelec))
+      casci.fcisolver.nroots = nroots
+      casci.kernel()
+      # Store CASCI results in class
+      self.ci_vectors = casci.ci
+      self.alpha_strings = cistring.gen_strings4orblist(range(ncas), nelec[0])
+      self.beta_strings = cistring.gen_strings4orblist(range(ncas), nelec[1])
+      self.ncore = casci.ncore
+
+  def initialize_casscf(self, ncas: int, nelec: Tuple[int, int], nroots: int = 1, state_avg: bool = True, fix_spin: Optional[float] = None):
+      """
+      Initialize CASSCF parameters.
+
+      Args:
+          ncas: Number of active space orbitals.
+          nelec: Tuple of (alpha electrons, beta electrons).
+          nroots: Number of states (including excited states) to compute.
+          state_avg: Whether to use state-averaged CASSCF.
+          fix_spin: Target spin state (S^2 value).
+      """
+      from pyscf import scf, mcscf
+      from pyscf.fci import cistring
+      # 基于 RHF 初始化 CASSCF
+      mf = scf.RHF(self._mol).run()
+      casscf = mcscf.CASSCF(mf, ncas, sum(nelec))
+
+      if nroots > 1:
+          casscf.fcisolver.nroots = nroots
+          if state_avg:
+              casscf.state_average_([1.0 / nroots] * nroots)
+
+      if fix_spin is not None:
+          casscf.fix_spin_(ss=fix_spin)
+
+      # 运行 CASSCF
+      casscf.kernel()
+
+      # 存储结果
+      self.casscf = casscf
+      self.ci_vectors = casscf.ci
+      self.alpha_strings = cistring.gen_strings4orblist(range(ncas), nelec[0])
+      self.beta_strings = cistring.gen_strings4orblist(range(ncas), nelec[1])
+      self.ncore = casscf.ncore
 
   @property
   def mo_coeff(self) -> Optional[np.ndarray]:
@@ -245,6 +315,27 @@ class Scf:
     return mo_values
 
   def eval_orbitals(self,
+                   pos: NDArray,
+                   nspins: Tuple[int, int]) -> Tuple[NDArray, NDArray]:
+    """Evaluates SCF orbitals at a set of positions.
+
+    Args:
+      pos: an array of electron positions to evaluate the orbitals at, of shape
+        (..., nelec*3), where the leading dimensions are arbitrary, nelec is the
+        number of electrons and the spin up electrons are ordered before the
+        spin down electrons.
+      nspins: tuple with number of spin up and spin down electrons.
+    Returns:
+      tuple with matrices of orbitals for spin up and spin down electrons, with
+      the same leading dimensions as in pos.
+    """
+    if self.method == 'hf':
+      return self.eval_hf_orbitals(pos, nspins)
+    else:
+      return self.eval_cas_orbitals(pos, nspins)
+
+
+  def eval_hf_orbitals(self,
                     pos: NDArray,
                     nspins: Tuple[int, int]) -> Tuple[NDArray, NDArray]:
     """Evaluates SCF orbitals at a set of positions.
@@ -307,8 +398,98 @@ class Scf:
         beta_spins.append(beta_excited)
       alpha_spin = jnp.stack(alpha_spins, axis=-3)
       beta_spin = jnp.stack(beta_spins, axis=-3)
+    return alpha_spin[:,:,None,...], beta_spin[:,:,None,...] # batch, n_states, n_states, n_determinants, n_alpha, n_alpha
 
-    return alpha_spin, beta_spin
+  def eval_cas_orbitals(self,
+                          pos: NDArray,
+                          nspins: Tuple[int, int]) -> Tuple[NDArray, NDArray]:
+      """
+      Evaluate CASCI orbitals for the largest n_determinants contributions.
+
+      Args:
+          pos: Electron positions, shape (N_sample, n_electrons * 3).
+          nspins: Tuple of number of spin-up and spin-down electrons.
+
+      Returns:
+          Tuple of:
+            - Alpha-spin orbitals of shape (N_sample, N_states, N_determinants, N_alpha, N_alpha)
+            - Beta-spin orbitals of shape (N_sample, N_states, N_determinants, N_beta, N_beta)
+      """
+      # Ensure ci_vectors, alpha_strings, and beta_strings are initialized
+      ci_vectors = self.ci_vectors
+      alpha_strings = self.alpha_strings
+      beta_strings = self.beta_strings
+
+      if not isinstance(pos, np.ndarray):  # Ensure `pos` is a NumPy array
+          try:
+              pos = pos.copy()
+          except AttributeError as exc:
+              raise ValueError('Input must be either NumPy or JAX array.') from exc
+
+      # Prepare dimensions
+      leading_dims = pos.shape[:-1]  # Batch dimensions
+      n_samples = pos.shape[0]  # Number of samples
+      n_states = len(ci_vectors)  # Number of CASCI states
+      n_alpha, n_beta = nspins  # Spin configuration
+
+      # Reshape positions to separate electrons
+      pos = jnp.reshape(pos, [-1, 3])  # (N_sample * n_electrons, 3)
+      
+
+      # Evaluate molecular orbitals
+      mos = self.eval_mos(pos)  # (N_sample * n_electrons, nbasis)
+      mos = [jnp.reshape(mo, leading_dims + (sum(nspins), -1)) for mo in mos]
+      # Include core orbitals in the occupied indices
+      n_core = self.ncore  # Number of core orbitals
+      core_indices = list(range(n_core))  # Core orbitals are always occupied
+
+      # Initialize output for all states
+      alpha_casci_orbitals = []
+      beta_casci_orbitals = []
+
+      # Loop over states 
+      for state_idx in range(n_states):
+          ci_vec = ci_vectors[state_idx]
+
+          # Get top n_determinants indices based on |CI| values
+          top_indices = np.argsort(-np.abs(ci_vec.flatten()))[:self.n_determinants]
+
+          state_alpha_orbitals = []
+          state_beta_orbitals = []
+
+          # Loop over top determinants
+          for idx in top_indices:
+              alpha_idx, beta_idx = np.unravel_index(idx, ci_vec.shape)
+              # Decode occupation for active space
+              active_alpha_occ = [
+                  i for i in range(len(alpha_strings))
+                  if (alpha_strings[alpha_idx] & (1 << i))
+              ]
+              active_beta_occ = [
+                  i for i in range(len(beta_strings))
+                  if (beta_strings[beta_idx] & (1 << i))
+              ]
+
+              # Combine core and active orbitals
+              alpha_occ = core_indices + [n_core + i for i in active_alpha_occ]
+              beta_occ = core_indices + [n_core + i for i in active_beta_occ]
+              print(f"state_idx:{state_idx}", alpha_occ, beta_occ, ci_vec[alpha_idx, beta_idx])
+              # Extract molecular orbitals for spin channels
+              alpha_orbitals = mos[0][..., :n_alpha, alpha_occ]*ci_vec[alpha_idx, beta_idx]
+              beta_orbitals = mos[1][..., n_alpha:, beta_occ]*ci_vec[alpha_idx, beta_idx]
+
+              # Append determinants for current state
+              state_alpha_orbitals.append(alpha_orbitals)
+              state_beta_orbitals.append(beta_orbitals)
+
+          # Stack determinants for this state
+          alpha_casci_orbitals.append(jnp.stack(state_alpha_orbitals, axis=-3))
+          beta_casci_orbitals.append(jnp.stack(state_beta_orbitals, axis=-3))
+
+      # Stack all states into separate arrays for alpha and beta spins
+      alpha_casci_orbitals = jnp.stack(alpha_casci_orbitals, axis=-4)
+      beta_casci_orbitals = jnp.stack(beta_casci_orbitals, axis=-4)
+      return alpha_casci_orbitals, beta_casci_orbitals
 
   def eval_slater(self,
                   pos: Union[jnp.ndarray, np.ndarray],
@@ -341,17 +522,29 @@ def scf_flatten(scf: Scf):
               scf._mol_jax._spec,
               scf._mol,
               scf.restricted,
+              scf.n_determinants,
+              scf.method,
+              scf.ci_vectors,
+              scf.alpha_strings,
+              scf.beta_strings,
+              scf.ncore,
               scf.excitations)
   return children, aux_data
 
 
 def scf_unflatten(aux_data, children) -> Scf:
   assert not children  # children should be empty.
-  mo_coeff, spec, mol, restricted, excitations = aux_data
+  mo_coeff, spec, mol, restricted, n_determinants, method, ci_vectors, alpha_strings, beta_strings, ncore, excitations = aux_data
   scf = Scf(pyscf_mol=mol.copy(), restricted=restricted)
   scf.mo_coeff = mo_coeff
   scf._mol_jax._spec = spec
   scf.excitations = excitations
+  scf.n_determinants = n_determinants
+  scf.method = method
+  scf.ci_vectors = ci_vectors
+  scf.alpha_strings = alpha_strings
+  scf.beta_strings = beta_strings
+  scf.ncore = ncore
   return scf
 # pylint: enable=protected-access
 

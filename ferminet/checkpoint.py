@@ -42,17 +42,26 @@ def find_last_checkpoint(ckpt_path: Optional[str] = None) -> Optional[str]:
     successfully using np.load.
   """
   if ckpt_path and os.path.exists(ckpt_path):
-    files = [f for f in os.listdir(ckpt_path) if 'qmcjax_ckpt_' in f]
-    # Handle case where last checkpoint is corrupt/empty.
-    for file in sorted(files, reverse=True):
-      fname = os.path.join(ckpt_path, file)
-      with open(fname, 'rb') as f:
+    if not os.path.isfile(ckpt_path):
+      files = [f for f in os.listdir(ckpt_path) if 'qmcjax_ckpt_' in f]
+      # Handle case where last checkpoint is corrupt/empty.
+      for file in sorted(files, reverse=True):
+        fname = os.path.join(ckpt_path, file)
+        with open(fname, 'rb') as f:
+          try:
+            np.load(f, allow_pickle=True)
+            return fname
+          except (OSError, EOFError, zipfile.BadZipFile):
+            logging.info('Error loading checkpoint %s. Trying next checkpoint...',
+                        fname)
+    else:
+      with open(ckpt_path, 'rb') as f:
         try:
           np.load(f, allow_pickle=True)
-          return fname
+          return ckpt_path
         except (OSError, EOFError, zipfile.BadZipFile):
           logging.info('Error loading checkpoint %s. Trying next checkpoint...',
-                       fname)
+                       ckpt_path)
   return None
 
 

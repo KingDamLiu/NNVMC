@@ -189,7 +189,7 @@ def restore(restore_filename: str, batch_size: Optional[int] = None):
         params = jax.tree_util.tree_map(lambda x: jax.device_get(x)[0], params)
         params = kfac_jax.utils.replicate_all_local_devices(params)
         opt_state = kfac_jax.utils.replicate_all_local_devices(opt_state)
-        mcmc_width = kfac_jax.utils.replicate_all_local_devices(mcmc_width[0])
+        mcmc_width = kfac_jax.utils.replicate_all_local_devices(mcmc_width)
     else:
       if (batch_size and size[0] * size[1] != batch_size):
         data = None

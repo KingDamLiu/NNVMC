@@ -28,6 +28,7 @@ from ferminet import curvature_tags_and_blocks
 from ferminet import envelopes
 from ferminet import hamiltonian
 from ferminet import loss as qmc_loss_functions
+from ferminet import spin_penalty
 from ferminet import mcmc
 from ferminet import networks
 from ferminet import observables
@@ -1150,26 +1151,42 @@ def init_local_energy_fn(cfg, signed_network, networks_list, charges, nspins, us
     return local_energy_fn
 
 def init_evaluate_loss(cfg, log_network, networks_list, log_network_for_loss, logabs_network, signed_network, local_energy_fn, use_complex):
-    if cfg.optim.get('spin_energy', 0.0) > 0.0:
-        # 最小化 <H + c * S^2> 而不是仅仅 <H>
-        # 创建一个新的局部能量函数，该函数取局部能量和局部自旋大小的加权和
-        local_s2_fn = observables.make_s2(
-            signed_network,
-            nspins=cfg.system.electrons,
-            states=cfg.system.states)
-        def local_energy_and_s2_fn(params, keys, data):
-            local_energy, aux_data = local_energy_fn(params, keys, data)
-            s2 = local_s2_fn(params, data, None)
-            weight = cfg.optim.get('spin_energy', 0.0)
-            if cfg.system.states:
-                aux_data = aux_data + weight * s2
-                local_energy_and_s2 = local_energy + weight * jnp.trace(s2)
-            else:
-                local_energy_and_s2 = local_energy + weight * s2
-            return local_energy_and_s2, aux_data
-        local_energy = local_energy_and_s2_fn
-    else:
-        local_energy = local_energy_fn
+    # local_s2_fns = []
+    # for i in range(cfg.system.states):
+    #     local_s2_fn = observables.make_s2(
+    #         networks_list[0],
+    #         nspins=cfg.system.electrons,
+    #         states=None)
+    #     local_s2_fns.append(local_s2_fn)
+    # local_energy = local_energy_fn
+    # # if cfg.optim.get('spin_energy', 0.0) > 0.0:
+    # #     # 最小化 <H + c * S^2> 而不是仅仅 <H>
+    # #     # 创建一个新的局部能量函数，该函数取局部能量和局部自旋大小的加权和
+    # #     def local_energy_and_s2_fn(params, keys, data):
+    # #         local_energy, aux_data = local_energy_fn(params, keys, data)
+    # #         p = params['state_{}'.format(cfg.system.states-1)]
+    # #         data_ = networks.FermiNetData(
+    # #             positions=data.positions[0],
+    # #             spins=data.spins[0],
+    # #             atoms=data.atoms,
+    # #             charges=data.charges,
+    # #         )
+    # #         s2 = local_s2_fn(p, data_, None)
+    # #         weight = cfg.optim.get('spin_energy', 0.0)
+    # #         if 0:
+    # #             aux_data = aux_data + weight * s2
+    # #             local_energy_and_s2 = local_energy + weight * jnp.trace(s2)
+    # #         else:
+    # #             local_energy_and_s2 = local_energy + weight * s2
+    # #         return local_energy_and_s2, aux_data
+    # #     local_energy = local_energy_and_s2_fn
+    # # else:
+    # #     local_energy = local_energy_fn
+    local_energy = local_energy_fn
+    spin_loss = spin_penalty.make_spin_penalty(
+        networks_list[-1],
+        nspins=cfg.system.electrons,
+        with_spin_grad=True)
 
     if cfg.optim.objective == 'vmc':
         evaluate_loss = qmc_loss_functions.make_loss(
@@ -1235,6 +1252,24 @@ def init_evaluate_loss(cfg, log_network, networks_list, log_network_for_loss, lo
             max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0))
     else:
         raise ValueError(f'Not a recognized objective: {cfg.optim.objective}')
+    def total_loss(
+        params: networks.ParamTree,
+        key: chex.PRNGKey,
+        data: networks.FermiNetData,
+    ):
+        """Evaluates the total loss for a batch of configurations."""
+        energy, aux_data = evaluate_loss(params, key, data)
+        p = params[list(params.keys())[-1]]
+        data_ = networks.FermiNetData(
+            positions=data.positions[:, -1],
+            spins=data.spins[:, -1],
+            atoms=data.atoms,
+            charges=data.charges,
+        )
+        spin, aux_data_spin = spin_loss(p, key, data_)
+        aux_data.spin_data = aux_data_spin
+        return energy + spin, aux_data
+    
     return evaluate_loss
 
 def init_learning_rate_schedule(cfg):

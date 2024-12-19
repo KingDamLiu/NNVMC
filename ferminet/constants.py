@@ -17,6 +17,7 @@
 import functools
 import jax
 import kfac_jax
+import jax.numpy as jnp
 
 
 # Axis name we pmap over.
@@ -32,3 +33,23 @@ pmean = functools.partial(
     kfac_jax.utils.pmean_if_pmap, axis_name=PMAP_AXIS_NAME)
 all_gather = functools.partial(kfac_jax.utils.wrap_if_pmap(jax.lax.all_gather),
                                axis_name=PMAP_AXIS_NAME)
+
+def pmean_with_mask(value, mask):
+  '''
+  Only take pmean with the not-masked-out value (namely mask > 0). Here `mask`
+  is expected to only take value between 0 and 1.
+  '''
+  return psum(jnp.sum(value * mask)) / psum(jnp.sum(mask))
+
+def pmean_with_structure_mask(value, mask):
+  '''
+  Only take pmean with the not-masked-out value (namely mask > 0). Here `mask`
+  is expected to only take value between 0 and 1.
+  '''
+  def inner(x, y):
+    return psum(jnp.sum(x * y, axis=(0))) / psum(jnp.sum(y, axis=(0)))
+
+  value_masked_mean = jax.tree_util.tree_map(inner, value, mask)
+  return value_masked_mean
+
+# ParamTree = Union[jnp.ndarray, Iterable['ParamTree'], Mapping[Any, 'ParamTree']]

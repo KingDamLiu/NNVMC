@@ -192,11 +192,12 @@ def make_s2(
                                                        data.atoms, data.charges)
           # Minus sign from reordering electron positions such that alpha
           # electrons come first.
-          s2 -= sign_psi * sign_psi_swap * jnp.exp(log_psi_swap - log_psi)
+          s2 -= (sign_psi * sign_psi_swap * jnp.exp(log_psi_swap - log_psi))[0]
           return ia, s2
 
       def _outer(ia, s2):
-        return jax.lax.fori_loop(0, nspins[1], _inner, (ia, s2))[1]
+        s2 = jax.lax.fori_loop(0, nspins[1], _inner, (ia, s2))[1]
+        return s2
 
       s2 = jax.lax.fori_loop(0, nspins[0], _outer, s2)
 

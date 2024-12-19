@@ -146,7 +146,7 @@ def ipf_train(cfg: ml_collections.ConfigDict):
                         break
                     elif status['vmctrain'][key]['Epochs'] < cfg.optim.iterations:
                         # 从当前能级继续训练
-                        cfg.system.states = i
+                        cfg.system.states = i+1
                         cfg.system.states_update = 1
                         cfg.log.restore_path = cfg.log.save_path+'/vmctrain/states_{}/'.format(i)
                         continue_train = True
@@ -168,7 +168,7 @@ def ipf_train(cfg: ml_collections.ConfigDict):
             logging.info('Restoring parameters from %s', ckpt_restore_filename)
             (t_init,
             data,
-            data_init,
+            params_init,
             opt_state_ckpt,
             mcmc_width_ckpt,
             density_state_ckpt) = checkpoint.restore(
@@ -181,26 +181,32 @@ def ipf_train(cfg: ml_collections.ConfigDict):
             opt_state_ckpt = None
             mcmc_width_ckpt = None
             density_state_ckpt = None
-
         # 加载已有波函数参数
         ckpt_restore_filename = checkpoint.find_last_checkpoint(checkpoint.create_save_path(cfg.log.restore_path))
         if ckpt_restore_filename:
             logging.info('Restoring parameters from %s', ckpt_restore_filename)
-            t_init, data_last, params_init, opt_state_ckpt, mcmc_width_ckpt, density_state_ckpt = checkpoint.restore(ckpt_restore_filename, host_batch_size)
+            t_init, data_init, params_init, opt_state_ckpt, mcmc_width_ckpt, density_state_ckpt = checkpoint.restore(ckpt_restore_filename, host_batch_size)
             # 覆盖参数和数据
-            for k in data_last.keys():
-                params[k] = data_last[k]
+            for k in params_init.keys():
+                params[k] = params_init[k]
 
             if continue_train==False:
                 t_init = 0
                 opt_state_ckpt = None
                 mcmc_width_ckpt = None
                 density_state_ckpt = None
+            
+                data.positions = jnp.concatenate([data_init.positions, data.positions[:, :, cfg.system.states-1:cfg.system.states, :]], axis=2)
+                data.spins = jnp.concatenate([data_init.spins, data.spins[:, :, cfg.system.states-1:cfg.system.states, :]], axis=2)
+            else:
+                data = data_init
+        else:
+            logging.info('No checkpoint found, start from scratch.')
+            data.positions = data.positions[:, :, cfg.system.states-1:cfg.system.states, :]
+            data.spins = data.spins[:, :, cfg.system.states-1:cfg.system.states, :]
 
         ckpt_save_path = checkpoint.create_save_path(cfg.log.save_path+'/vmctrain/states_{}/'.format(i))
 
-        data.positions = jnp.concatenate([data_init.positions, data.positions[:, :, cfg.system.states-1:cfg.system.states, :]], axis=2)
-        data.spins = jnp.concatenate([data_init.spins, data.spins[:, :, cfg.system.states-1:cfg.system.states, :]], axis=2) 
 
         # 初始化日志和观测量
         (train_schema, observable_fns, observable_states, energy_matrix_file,
@@ -281,7 +287,7 @@ def ipf_train(cfg: ml_collections.ConfigDict):
             raise ValueError(f'Unknown optimizer: {optimizer}')
 
         # 主训练循环
-        out_file_name = os.path.join(ckpt_save_path, 'train_stats'+ datetime.datetime.now().strftime('%Y_%m_%d_%H:%M:%S') + '.csv')
+        out_file_name = os.path.join(ckpt_save_path, 'train_stats.csv')
         start_time = time.time()
 
         E_means = []
@@ -404,20 +410,23 @@ def ipf_train(cfg: ml_collections.ConfigDict):
             if len(E_means) > 100:
                 E_means.pop(0)
                 E_stds.pop(0)
+                # 满足收敛判据时保存参数
+                if (np.mean(E_stds) < 0.9 and np.std(E_means) < 5e-4):
+                    checkpoint.save(ckpt_save_path, t, data, params, opt_state, mcmc_width)
+                    time_of_last_ckpt = time.time()
+                    status['vmctrain']['state_{}'.format(cfg.system.states-1)]['Epochs'] = t+1
+                    status['vmctrain']['state_{}'.format(cfg.system.states-1)]['status'] = True
+                    with open(cfg.log.save_path+'/status.yaml', 'w') as f:
+                        yaml.dump(status, f)
+                    break
 
             # 检查点保存
-            if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60:
+            if (time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60) or (t+1)==cfg.optim.iterations:
                 checkpoint.save(ckpt_save_path, t, data, params, opt_state, mcmc_width)
                 time_of_last_ckpt = time.time()
-                status['vmctrain']['states_{}'.format(cfg.system.states-1)]['Epochs'] = t
+                status['vmctrain']['state_{}'.format(cfg.system.states-1)]['Epochs'] = t+1
                 with open(cfg.log.save_path+'/status.yaml', 'w') as f:
                     yaml.dump(status, f)
-            
-            # 满足收敛判据时保存参数
-            if jnp.mean(E_stds) < 0.01 and jnp.std(E_means) < 0.01:
-                checkpoint.save(ckpt_save_path, t, data, params, opt_state, mcmc_width)
-                time_of_last_ckpt = time.time()
-                break
 
         # 关闭日志
         if cfg.system.states:

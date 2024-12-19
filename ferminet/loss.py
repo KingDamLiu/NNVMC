@@ -21,6 +21,7 @@ import chex
 from ferminet import constants
 from ferminet import hamiltonian
 from ferminet import networks
+from ferminet import spin_penalty
 import folx
 import jax
 import jax.numpy as jnp
@@ -50,6 +51,7 @@ class AuxiliaryLossData:
   local_energy_mat: jax.Array | None = None
   s_ij: jax.Array | None = None
   mean_s_ij: jax.Array | None = None
+  spin_data: spin_penalty.SpinAuxData | None = None
 
 
 class LossFn(Protocol):

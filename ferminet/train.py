@@ -570,11 +570,11 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   params = network.init(subkey)
   params = kfac_jax.utils.replicate_all_local_devices(params)
   signed_network = network.apply
+  network_mcmc = networks.make_state_diag(signed_network,
+                                            cfg.system.get('states', 0),
+                                            complex_output=use_complex)
   # Often just need log|psi(x)|.
   if cfg.system.get('states', 0):
-    network_mcmc = networks.make_state_diag(signed_network,
-                                               cfg.system.get('states', 0),
-                                               complex_output=use_complex)
     if cfg.optim.objective == 'vmc_overlap':
       logabs_network = networks.make_state_trace(signed_network,
                                                  cfg.system.states)

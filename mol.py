@@ -35,8 +35,7 @@ BeH_mol.build(
 BH_mol = gto.Mole()
 BH_mol.build(
     atom=f'B 0 0 0; H 1.2324 0 0',
-    # basis={'B': 'ccpvdz', 'H': 'ccpvdz'},
-    basis={'B': '6-31g', 'H': '6-31g'},
+    basis={'B': 'ccpvdz', 'H': 'ccpvdz'},
     spin=0)
 
 H2O_mol = gto.Mole()
@@ -46,11 +45,12 @@ H2O_mol.build(
     spin=0)
 
 cfg = base_config.default()
-cfg.system.pyscf_mol = H2O_mol
+cfg.system.pyscf_mol = BH_mol
 
 # Set training parameters
 cfg.optim.laplacian = 'folx'
 cfg.optim.reset_if_nan = True
+cfg.optim.spin_energy = 1.0
 # cfg.optim.optimizer = 'sgd'
 cfg.optim.lr.rate=0.05
 cfg.debug.check_nan = True
@@ -76,8 +76,8 @@ cfg.network.type = 'multi'# 'single'
 # cfg.network.full_det = False
 cfg.optim.objective='vmc_ipf'
 cfg.pretrain.excitation_type = 'ordered' # 'random'
-cfg.log.save_path = '../Test/ferminet/'+'BH_cassci_diag_ipf'
-cfg.run_model = 'test'
+cfg.log.save_path = '../IPF/ferminet/'+'BH_4090'
+cfg.run_model = 'run'
 # cfg.log.restore_path = ''
 
 status = dict(
@@ -87,22 +87,20 @@ status = dict(
         status = False,
         Epochs = 0,
     ),
-    vmctrain = dict(
-        psi_0 = dict(
-            status = False,
-            Epochs = 0,
-            ),
-        ),
+    vmctrain = dict(),
     posttrain = dict(
         status = False,
         Epochs = 0,)
 )
 
 for i in range(cfg.system.states_total):
-    status['vmctrain']['psi_'+str(i)] = dict(
+    status['vmctrain']['state_'+str(i)] = dict(
         status = False,
         Epochs = 0,
     )
+if not os.path.exists(cfg.log.save_path):
+    os.makedirs(cfg.log.save_path)
+
 if not os.path.exists(cfg.log.save_path+'/status.yaml'):
     with open(cfg.log.save_path+'/status.yaml', 'w') as f:
         yaml.dump(status, f)
@@ -117,8 +115,7 @@ else:
 
 if status['pretrain']['status'] == False:
     main.pre_train(cfg, status)
-elif status['pretrain']['status'] == True:
-    main.ipf_train(cfg, status)
+main.ipf_train(cfg)
 
 # if status
 # # main.vmc_train(cfg)
